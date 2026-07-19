@@ -1,0 +1,28 @@
+# Strict JSON file exclusion
+*.json
+**/*.json
+config.json
+Control.panel.json
+sub_cache.json
+
+# Python runtime & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# IDE and Tooling
+.vscode/
+.clinerules
+.cursorrules
+
+# Build outputs and compiled binaries
+dist/
+build/
+*.spec
+*.7z
