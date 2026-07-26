@@ -43,6 +43,7 @@ def broadcast(message: dict):
 def _get_audio_devices():
     devices = []
     import sys
+    import subprocess
     if sys.platform == "win32":
         try:
             import winreg
@@ -60,20 +61,14 @@ def _get_audio_devices():
                                 prop_path = f"{subkey_path}\\Properties"
                                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, prop_path) as prop_key:
                                     try:
-                                        # {a45c254e-df1c-4efd-8020-67d146a850e0},2 is PKEY_Device_FriendlyName
                                         friendly_name, _ = winreg.QueryValueEx(prop_key, "{a45c254e-df1c-4efd-8020-67d146a850e0},2")
                                         if friendly_name:
-                                            # {b3f8fa53-0004-438e-9003-51a46e139bfc},6 is PKEY_Device_DeviceDesc (driver description)
                                             try:
                                                 driver_desc, _ = winreg.QueryValueEx(prop_key, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")
                                             except FileNotFoundError:
                                                 driver_desc = None
                                             
-                                            if driver_desc:
-                                                full_name = f"{friendly_name} ({driver_desc})"
-                                            else:
-                                                full_name = friendly_name
-
+                                            full_name = f"{friendly_name} ({driver_desc})" if driver_desc else friendly_name
                                             if full_name not in devices:
                                                 devices.append(full_name)
                                     except FileNotFoundError:
@@ -82,6 +77,27 @@ def _get_audio_devices():
                         pass
         except Exception as e:
             print(f"[Device List] Error getting devices via winreg: {e}")
+    elif sys.platform.startswith("linux"):
+        try:
+            res = subprocess.run(["pactl", "list", "sinks"], capture_output=True, text=True, timeout=3)
+            if res.returncode == 0:
+                current_name = None
+                current_desc = None
+                for line in res.stdout.splitlines():
+                    l = line.strip()
+                    if l.startswith("Nom") or l.startswith("Name:"):
+                        current_name = l.split(":", 1)[1].strip()
+                    elif l.startswith("Description"):
+                        current_desc = l.split(":", 1)[1].strip()
+                    
+                    if current_name and current_desc:
+                        fmt = f"{current_desc} [{current_name}]"
+                        if fmt not in devices:
+                            devices.append(fmt)
+                        current_name = None
+                        current_desc = None
+        except Exception as e:
+            print(f"[Device List] Error getting Linux audio devices: {e}")
     return devices
 
 
@@ -90,17 +106,33 @@ def _get_audio_devices():
 async def get_tts_info():
     import platform
     import shutil
+    import sys
+    import glob
     info = {"voices": [], "devices": [], "cameras": [], "os": platform.system()}
     
-    # ... (ffplay/piper checks) ...
-    ffplay_path = os.path.join(BASE_DIR, "ffplay.exe") if platform.system() == "Windows" else "ffplay"
+    ffplay_exe = "ffplay.exe" if platform.system() == "Windows" else "ffplay"
+    ffplay_path = os.path.join(BASE_DIR, ffplay_exe)
     info["has_ffplay"] = os.path.exists(ffplay_path) or shutil.which("ffplay") is not None
-    piper_path = os.path.join(BASE_DIR, "piper", "piper.exe") if platform.system() == "Windows" else os.path.join(BASE_DIR, "piper", "piper")
+
+    piper_exe = "piper.exe" if platform.system() == "Windows" else "piper"
+    piper_path = os.path.join(BASE_DIR, "piper", piper_exe)
     info["has_piper"] = os.path.exists(piper_path) or shutil.which("piper") is not None
+
+    if sys.platform.startswith("linux"):
+        events = glob.glob('/dev/input/event*')
+        has_access = any(os.access(e, os.R_OK) for e in events) if events else True
+        info["linux_input_permission_needed"] = not has_access
+    else:
+        info["linux_input_permission_needed"] = False
 
     if HAS_TTS:
         info["voices"].append({"id": "en_US-lessac-low.onnx", "name": "en_US-lessac-low (en-US)"})
-        # ... (rest of voices logic) ...
+        piper_dir = os.path.join(BASE_DIR, "piper")
+        if os.path.exists(piper_dir):
+            for f in os.listdir(piper_dir):
+                if f.endswith(".onnx") and f != "en_US-lessac-low.onnx":
+                    voice_name = f.replace(".onnx", "")
+                    info["voices"].append({"id": f, "name": voice_name})
             
     import asyncio
     audio_devices = await asyncio.to_thread(_get_audio_devices)
@@ -111,25 +143,88 @@ async def get_tts_info():
     
     return info
 
+async def _authorize_linux_input_task(websocket):
+    try:
+        import sys
+        import getpass
+        import shutil
+        import subprocess
+
+        if not sys.platform.startswith("linux"):
+            await websocket.send(json.dumps({"type": "status", "message": "Authorization is only applicable on Linux."}))
+            return
+
+        username = getpass.getuser()
+        await websocket.send(json.dumps({"type": "status", "message": "Opening Linux OS Authorization Window..."}))
+
+        def _run_pkexec():
+            if shutil.which("pkexec"):
+                cmd = ["pkexec", "usermod", "-aG", "input", username]
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                return res.returncode == 0, res.stderr
+            return False, "pkexec command not found."
+
+        success, err = await asyncio.to_thread(_run_pkexec)
+        if success:
+            msg = f"Permissions Granted! Added user '{username}' to the 'input' group.\n\n⚠️ IMPORTANT: You MUST log out and log back in (or reboot) for Linux group permissions to take effect!"
+            await websocket.send(json.dumps({"type": "status", "message": msg}))
+            await websocket.send(json.dumps({"type": "linux_input_authorized", "message": msg}))
+
+        else:
+            await websocket.send(json.dumps({"type": "status", "message": f"Authorization cancelled or failed: {err}"}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "status", "message": f"Authorization error: {e}"}))
+
+
 async def _install_piper_task(websocket):
     try:
-        PIPER_ZIP_URL = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip"
-        zip_path = os.path.join(BASE_DIR, "piper_temp.zip")
+        import platform
+        import tarfile
+
+        system = platform.system()
+        machine = platform.machine().lower()
+
+        if system == "Windows":
+            PIPER_URL = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip"
+        elif system == "Darwin":
+            PIPER_URL = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_x86_64.tar.gz"
+        else: # Linux
+            if "arm" in machine or "aarch64" in machine:
+                PIPER_URL = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz"
+            elif "armv7" in machine:
+                PIPER_URL = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_armv7l.tar.gz"
+            else:
+                PIPER_URL = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz"
+
+        archive_name = "piper_temp.zip" if PIPER_URL.endswith(".zip") else "piper_temp.tar.gz"
+        archive_path = os.path.join(BASE_DIR, archive_name)
         MODEL_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/low/en_US-lessac-low.onnx"
         JSON_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/low/en_US-lessac-low.onnx.json"
 
         await websocket.send(json.dumps({"type": "status", "message": "Downloading Piper TTS..."}))
-        await asyncio.to_thread(urllib.request.urlretrieve, PIPER_ZIP_URL, zip_path)
+        await asyncio.to_thread(urllib.request.urlretrieve, PIPER_URL, archive_path)
 
         await websocket.send(json.dumps({"type": "status", "message": "Extracting Piper..."}))
         def _extract_and_download():
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(BASE_DIR)
-            if os.path.exists(zip_path):
-                os.remove(zip_path)
+            if archive_name.endswith(".zip"):
+                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                    zip_ref.extractall(BASE_DIR)
+            else:
+                with tarfile.open(archive_path, 'r:gz') as tar_ref:
+                    tar_ref.extractall(BASE_DIR)
+            if os.path.exists(archive_path):
+                os.remove(archive_path)
             
             piper_dir = os.path.join(BASE_DIR, "piper")
             os.makedirs(piper_dir, exist_ok=True)
+
+            piper_bin = os.path.join(piper_dir, "piper")
+            if os.path.exists(piper_bin):
+                try:
+                    os.chmod(piper_bin, 0o755)
+                except Exception as e:
+                    print(f"[Piper Install] Failed to chmod piper: {e}")
+
             model_path = os.path.join(piper_dir, "en_US-lessac-low.onnx")
             json_path = os.path.join(piper_dir, "en_US-lessac-low.onnx.json")
             
@@ -143,6 +238,7 @@ async def _install_piper_task(websocket):
 
         await websocket.send(json.dumps({"type": "status", "message": "Piper TTS Installed Successfully!"}))
         await websocket.send(json.dumps({"type": "piper_installed"}))
+
     except Exception as e:
         await websocket.send(json.dumps({"type": "status", "message": f"Error installing Piper: {e}"}))
 
@@ -322,6 +418,9 @@ async def ws_register(websocket):
                     asyncio.create_task(_get_piper_voices_list(websocket))
                 elif data.get("type") == "install_piper_voice":
                     asyncio.create_task(_install_piper_voice_task(websocket, data.get("voice_key"), data.get("files_dict")))
+                elif data.get("type") == "authorize_linux_input":
+                    asyncio.create_task(_authorize_linux_input_task(websocket))
+
                 
                 # --- WATERFALL LOADING HANDLERS ---
                 elif data.get("type") == "request_initial_obs":

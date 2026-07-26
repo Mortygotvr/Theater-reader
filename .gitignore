@@ -24,5 +24,8 @@ env/
 # Build outputs and compiled binaries
 dist/
 build/
+AppDir/
+piper/
+*.AppImage
 *.spec
 *.7z

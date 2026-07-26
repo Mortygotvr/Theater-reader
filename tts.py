@@ -7,6 +7,7 @@ import tempfile
 import math
 import struct
 import wave
+import shutil
 from config import BASE_DIR, STOP_EVENT
 
 HAS_TTS = True
@@ -20,6 +21,8 @@ def _play_audio_stream(file_path, device_name=None, volume=1.0):
 
     if sys.platform == "win32":
         ffplay_path = os.path.join(BASE_DIR, "ffplay.exe")
+        if not os.path.exists(ffplay_path):
+            ffplay_path = shutil.which("ffplay") or "ffplay"
         cmd = [
             ffplay_path,
             "-nodisp",
@@ -48,6 +51,62 @@ def _play_audio_stream(file_path, device_name=None, volume=1.0):
 
     elif sys.platform == "darwin":
         subprocess.run(["afplay", "-v", str(volume), file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    else:
+        # Linux / Unix
+        ffplay_path = os.path.join(BASE_DIR, "ffplay")
+        if not os.path.exists(ffplay_path):
+            ffplay_path = shutil.which("ffplay")
+
+        if ffplay_path:
+            cmd = [
+                ffplay_path,
+                "-nodisp",
+                "-autoexit",
+                "-vn",
+                "-sn",
+                "-fast",
+                "-analyzeduration", "0",
+                "-probesize", "32",
+                "-fflags", "nobuffer",
+                "-threads", "1"
+            ]
+            if vol_val != 100:
+                cmd.extend(["-volume", str(vol_val)])
+            cmd.append(file_path)
+
+            env = os.environ.copy()
+            if device_name and device_name.lower() != "system default":
+                sink_name = device_name
+                if "[" in device_name and device_name.endswith("]"):
+                    sink_name = device_name.rsplit("[", 1)[1].rstrip("]")
+                env["PULSE_SINK"] = sink_name
+                env["SDL_AUDIO_DEVICE_NAME"] = sink_name
+
+            try:
+                subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except Exception as e:
+                print(f"[TTS] ffplay Error: {e}")
+        else:
+            # Fallback audio players for Linux
+            player = shutil.which("paplay") or shutil.which("pw-play") or shutil.which("aplay")
+            if player:
+                cmd = [player]
+                env = os.environ.copy()
+                if device_name and device_name.lower() != "system default":
+                    sink_name = device_name
+                    if "[" in device_name and device_name.endswith("]"):
+                        sink_name = device_name.rsplit("[", 1)[1].rstrip("]")
+                    if "paplay" in player:
+                        cmd.extend(["-d", sink_name])
+                    else:
+                        env["PULSE_SINK"] = sink_name
+                cmd.append(file_path)
+                try:
+                    subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                except Exception as e:
+                    print(f"[TTS] Audio Playback Error: {e}")
+
 
 def _generate_bell_wav(bell_path, output_path):
     if not (bell_path and os.path.isfile(bell_path)):
@@ -113,7 +172,21 @@ def tts_worker():
                 if not os.path.exists(model_path):
                     model_path = os.path.join(model_base_path, "en_US-lessac-low.onnx")
 
-                piper_exe = os.path.join(model_base_path, "piper.exe")
+                piper_name = "piper.exe" if sys.platform == "win32" else "piper"
+                piper_exe = os.path.join(model_base_path, piper_name)
+                
+                if not os.path.exists(piper_exe):
+                    sys_piper = shutil.which("piper")
+                    if sys_piper:
+                        piper_exe = sys_piper
+
+                if os.path.exists(piper_exe) and sys.platform != "win32":
+                    try:
+                        if not os.access(piper_exe, os.X_OK):
+                            os.chmod(piper_exe, 0o755)
+                    except Exception:
+                        pass
+
 
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                     temp_filename = tmp.name

@@ -17,9 +17,10 @@ except ImportError:
 
 import config
 from config import (
-    BASE_DIR, SUB_DB, STOP_EVENT, RELOAD_CONFIG_ID,
+    BASE_DIR, STATIC_DIR, SUB_DB, STOP_EVENT, RELOAD_CONFIG_ID,
     load_complete_config_state, save_complete_config_state, load_sammi_settings, load_sub_cache, save_sub_cache
 )
+
 from tts import start_tts, tts_queue, HAS_TTS
 from websocket_server import start_ws_server, broadcast
 from sammi_bridge import send_to_sammi
@@ -126,8 +127,10 @@ try:
     import pystray
     from PIL import Image, ImageDraw
     HAS_TRAY = True
-except ImportError:
+except Exception:
     HAS_TRAY = False
+
+
 
 async def handle_moderation_and_actions(
     msg_text,
@@ -230,7 +233,10 @@ async def main():
     start_tts()
     start_ws_server()
     
-    overlay_path = os.path.join(BASE_DIR, "chat_overlay.html")
+    overlay_path = os.path.join(STATIC_DIR, "chat_overlay.html")
+    if not os.path.exists(overlay_path):
+        overlay_path = os.path.join(BASE_DIR, "chat_overlay.html")
+
     print(f"\n[UI] Message Overlay is available at:\n     file://{overlay_path}")
 
     session = aiohttp.ClientSession()
@@ -486,12 +492,25 @@ async def main():
 
 
 def create_image():
+    icon_paths = [
+        os.path.join(STATIC_DIR, 'org.theater.TheaterReader.png'),
+        os.path.join(BASE_DIR, 'org.theater.TheaterReader.png'),
+    ]
+    for p in icon_paths:
+        if os.path.exists(p):
+            try:
+                img = Image.open(p).convert('RGBA')
+                return img.resize((64, 64), Image.Resampling.LANCZOS)
+            except Exception:
+                pass
+
     w, h = 64, 64
-    image = Image.new('RGB', (w, h), color=(30, 30, 30))
+    image = Image.new('RGBA', (w, h), color=(0, 0, 0, 0))
     d = ImageDraw.Draw(image)
-    d.rectangle([(16,16), (48,48)], fill=(0, 122, 204))
-    d.ellipse([(28,28), (36,36)], fill="white")
+    d.ellipse([(4, 4), (60, 60)], fill=(0, 122, 204, 255))
+    d.polygon([(24, 16), (24, 48), (48, 32)], fill=(255, 255, 255, 255))
     return image
+
 
 if __name__ == "__main__":
     import multiprocessing
@@ -519,12 +538,13 @@ if __name__ == "__main__":
             
         def on_open_settings(icon, item): 
             import webbrowser
-            settings_path = os.path.join(BASE_DIR, 'settings.html')
+            settings_path = os.path.join(STATIC_DIR, 'settings.html')
             if not os.path.exists(settings_path):
-                alt_path = os.path.join(BASE_DIR, 'dist', 'settings.html')
-                if os.path.exists(alt_path):
-                    settings_path = alt_path
+                settings_path = os.path.join(BASE_DIR, 'settings.html')
+                if not os.path.exists(settings_path):
+                    settings_path = os.path.join(BASE_DIR, 'dist', 'settings.html')
             webbrowser.open(f"file:///{settings_path.replace(chr(92), '/')}")
+
 
         def is_vol_checked(item): return abs(config.GLOBAL_CONFIG.get("tts", {}).get("volume", 1.0) * 100 - int(item.text.replace('%', ''))) < 1
         def set_volume(icon, item):

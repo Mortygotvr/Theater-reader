@@ -382,6 +382,18 @@
             </div>
         </div>
 
+        <!-- LINUX INPUT PERMISSION AUTHORIZATION BOX -->
+        <div id="linux_permissions_box" style="display: none; background: #2d2d30; border-left: 5px solid #ff9800; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+            <p class="desc-text m-0" style="color: #fff;">
+                <b>⚠️ Linux Input Permissions Required:</b><br>
+                Global keypress monitoring on Linux requires permission to read input devices (being a member of the <code>input</code> user group).<br>
+                <em style="color: #ffcc00; display: block; margin-top: 5px;">⚠️ Note: After granting permission, you MUST log out and log back in (or reboot) for Linux to apply group permissions.</em>
+            </p>
+            <button id="btn_authorize_linux_input" class="btn-blue" style="margin-top: 12px;" onclick="authorizeLinuxInputPermissions()">🔐 Grant Input Permissions (OS Authorization Window)</button>
+        </div>
+
+
+
 <div class="flex-between-center border-bottom mb-20 pb-15">
             <h2 class="m-0 border-none p-0">Hotkey Bridges</h2>
             <button class="btn-blue" onclick="addHotkey()">+ Add Hotkey Bind</button></div>

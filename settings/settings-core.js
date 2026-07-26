@@ -72,6 +72,16 @@ function connect() {
                 if(box) box.style.display = 'none';
             }, 2000);
         }
+        if(data.type === "linux_input_authorized") {
+            const btn = document.getElementById('btn_authorize_linux_input');
+            if (btn) btn.innerText = "Permissions Granted!";
+            alert(data.message || "Permissions granted! Please log out and back in for changes to apply.");
+            setTimeout(() => {
+                const box = document.getElementById('linux_permissions_box');
+                if(box) box.style.display = 'none';
+            }, 2000);
+        }
+
         if(data.type === "voice_installed") {
             const btn = document.getElementById('btn_install_voice');
             if (btn) {

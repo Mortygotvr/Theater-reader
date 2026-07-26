@@ -1,0 +1,9 @@
+aiohttp
+websockets
+requests
+vaderSentiment
+pytchat
+pystray
+pillow
+keyboard
+pynput

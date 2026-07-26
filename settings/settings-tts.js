@@ -2,21 +2,31 @@
 let currentHfVoices = {};
 
 function loadTTSInfo(info) {
-    if (info.os && info.os !== "Windows") {
+    if (info.has_ffplay) {
         const ffbox = document.getElementById("ffplay_install_box");
         if (ffbox) ffbox.style.display = "none";
+    } else {
+        const ffbox = document.getElementById("ffplay_install_box");
+        if (ffbox) ffbox.style.display = "block";
+    }
+
+    if (info.has_piper) {
         const piperbox = document.getElementById("piper_install_box");
         if (piperbox) piperbox.style.display = "none";
     } else {
-        if (info.has_ffplay) {
-            const ffbox = document.getElementById("ffplay_install_box");
-            if (ffbox) ffbox.style.display = "none";
-        }
-        if (info.has_piper) {
-            const piperbox = document.getElementById("piper_install_box");
-            if (piperbox) piperbox.style.display = "none";
-        }
+        const piperbox = document.getElementById("piper_install_box");
+        if (piperbox) piperbox.style.display = "block";
     }
+
+    if (info.linux_input_permission_needed) {
+        const pbox = document.getElementById("linux_permissions_box");
+        if (pbox) pbox.style.display = "block";
+    } else {
+        const pbox = document.getElementById("linux_permissions_box");
+        if (pbox) pbox.style.display = "none";
+    }
+
+
 
     const voiceSelect = document.getElementById('tts_voice_id');
 
@@ -122,6 +132,22 @@ function installFFplay() {
         if (btn) {
             btn.disabled = true;
             btn.innerText = "Installing...";
+        }
+    }
+}
+
+function authorizeLinuxInputPermissions() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert("Not connected to background application!");
+        return;
+    }
+    if (confirm("This will trigger a system authorization window to add your user account to the 'input' group for global hotkeys.\n\nNote: After granting permission, you MUST log out and log back in (or reboot) for changes to take effect. Continue?")) {
+        ws.send(JSON.stringify({ type: "authorize_linux_input" }));
+        document.getElementById('status-msg').innerText = "Opening OS Authorization Window...";
+        const btn = document.getElementById('btn_authorize_linux_input');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerText = "Authorizing...";
         }
     }
 }

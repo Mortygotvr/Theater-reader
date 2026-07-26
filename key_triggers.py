@@ -4,19 +4,25 @@ import time
 import threading
 import re
 import ctypes
+import sys
+import shutil
+import subprocess
 
 try:
     import keyboard
 except ImportError:
     keyboard = None
 
-# Constants for direct OS-level key injection
+try:
+    from pynput import keyboard as pynput_keyboard
+except ImportError:
+    pynput_keyboard = None
+
+# Constants for direct OS-level key injection (Windows)
 KEYEVENTF_KEYDOWN = 0x0000
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 
-# A lookup map to decouple from the `keyboard` module's internal APIs that are breaking.
-# This gives us exact Virtual Key codes (VK) for OS injection.
 VK_MAP = {
     'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73, 'f5': 0x74, 'f6': 0x75,
     'f7': 0x76, 'f8': 0x77, 'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
@@ -34,26 +40,82 @@ def get_vk_for_key(k):
     k = k.lower().strip()
     if k in VK_MAP:
         return VK_MAP[k]
-    # For a-z and 0-9, VK is just the ASCII of the uppercase character
     if len(k) == 1 and ('a' <= k <= 'z' or '0' <= k <= '9'):
         return ord(k.upper())
     return 0
 
-
-# Global tracking to prevent double-firing
 _last_fired = {}
+_pynput_listener = None
+_pressed_keys = set()
+
+def _normalize_key_name(key):
+    try:
+        if hasattr(key, 'name') and key.name:
+            n = key.name.lower()
+            if n in ('ctrl_l', 'ctrl_r', 'ctrl', 'control'): return 'ctrl'
+            if n in ('alt_l', 'alt_r', 'alt_gr', 'alt'): return 'alt'
+            if n in ('shift_l', 'shift_r', 'shift'): return 'shift'
+            if n in ('cmd', 'cmd_l', 'cmd_r', 'super', 'win'): return 'win'
+            if n == 'page_up': return 'page up'
+            if n == 'page_down': return 'page down'
+            return n
+        elif hasattr(key, 'char') and key.char:
+            return key.char.lower()
+        elif hasattr(key, 'vk') and key.vk:
+            vk = key.vk
+            if 96 <= vk <= 105:
+                return f"numpad {vk - 96}"
+            if vk == 106: return "multiply"
+            if vk == 107: return "add"
+            if vk == 109: return "subtract"
+            if vk == 110: return "decimal"
+            if vk == 111: return "divide"
+    except Exception:
+        pass
+    return str(key).lower()
+
+def _simulate_keypress_pynput(keys_str):
+    if not pynput_keyboard:
+        return False
+    try:
+        ctl = pynput_keyboard.Controller()
+        parts = [k.lower().strip() for k in keys_str.split('+')]
+        
+        def resolve_key(k):
+            if k in ('ctrl', 'control'): return pynput_keyboard.Key.ctrl
+            if k == 'alt': return pynput_keyboard.Key.alt
+            if k == 'shift': return pynput_keyboard.Key.shift
+            if k in ('win', 'cmd', 'super'): return pynput_keyboard.Key.cmd
+            if k == 'enter': return pynput_keyboard.Key.enter
+            if k == 'space': return pynput_keyboard.Key.space
+            if k == 'tab': return pynput_keyboard.Key.tab
+            if k == 'esc': return pynput_keyboard.Key.esc
+            if k == 'backspace': return pynput_keyboard.Key.backspace
+            if k == 'up': return pynput_keyboard.Key.up
+            if k == 'down': return pynput_keyboard.Key.down
+            if k == 'left': return pynput_keyboard.Key.left
+            if k == 'right': return pynput_keyboard.Key.right
+            if k.startswith('f') and k[1:].isdigit():
+                return getattr(pynput_keyboard.Key, k, None)
+            if len(k) == 1:
+                return k
+            return getattr(pynput_keyboard.Key, k, None)
+
+        resolved = [resolve_key(k) for k in parts if resolve_key(k) is not None]
+        for rk in resolved:
+            ctl.press(rk)
+        time.sleep(0.05)
+        for rk in reversed(resolved):
+            ctl.release(rk)
+        return True
+    except Exception as e:
+        print(f"[Hotkey Bridge] pynput simulation error: {e}")
+        return False
 
 def check_and_fire_hotkeys(config, incoming_trigger, event_queue=None):
-    """
-    Checks if an incoming stream alert matches a configured hotkey
-    and physically simulates the keystrokes on the system.
-    """
     if not config.get("enable_hotkeys", False):
         return
 
-    if not keyboard:
-        return
-        
     hotkeys = config.get("hotkeys", [])
     if not hotkeys: 
         return
@@ -70,42 +132,49 @@ def check_and_fire_hotkeys(config, incoming_trigger, event_queue=None):
             if delay > 0:
                 time.sleep(delay / 1000.0)
             try:
-                log_diag(f"[Hotkey Bridge] Executing Raw OS Keystroke -> {keys_str} (Triggered by: {incoming_trigger})")
+                log_diag(f"[Hotkey Bridge] Executing Keystroke -> {keys_str} (Triggered by: {incoming_trigger})")
                 
-                # Split the macro components (e.g. 'ctrl+f1' -> ['ctrl', 'f1'])
-                keys = keys_str.split('+')
-                
-                # We completely bypass the python library for sending because games/heavy apps 
-                # often ignore synthetic "Virtual Keys". We force the OS to inject raw Hardware Scan Codes.
-                
-                # Step 1: Press all keys down using raw C-Types Win32 API
-                for k in keys:
-                    try:
-                        vk = get_vk_for_key(k)
-                        if vk == 0:
-                            log_diag(f"[Hotkey Bridge] Could not find Virtual Key code for {k}")
-                            continue
+                if sys.platform == "win32" and hasattr(ctypes, "windll"):
+                    keys = keys_str.split('+')
+                    for k in keys:
+                        try:
+                            vk = get_vk_for_key(k)
+                            if vk == 0: continue
+                            scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
+                            ctypes.windll.user32.keybd_event(vk, scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYDOWN, 0)
+                        except Exception as hw_e:
+                            log_diag(f"[Hotkey Bridge] Mapping failure for {k}: {hw_e}")
                         
-                        # Translate the VK to a hardware scan code directly from Windows mappings
-                        scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0) # 0 = MAPVK_VK_TO_VSC
-                        # Send the scancode into the Windows keystroke pipeline with KEYEVENTF_SCANCODE
-                        ctypes.windll.user32.keybd_event(vk, scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYDOWN, 0)
-                    except Exception as hw_e:
-                        log_diag(f"[Hotkey Bridge] Mapping failure for {k}: {hw_e}")
+                    time.sleep(0.1) 
                     
-                time.sleep(0.1) 
-                
-                # Step 2: Release in exact reverse order
-                for k in reversed(keys):
-                    try:
-                        vk = get_vk_for_key(k)
-                        if vk == 0: continue
-                        
-                        scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
-                        ctypes.windll.user32.keybd_event(vk, scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0)
-                    except Exception as hw_e:
-                        log_diag(f"[Hotkey Bridge] Release mapping failure for {k}: {hw_e}")
-                        
+                    for k in reversed(keys):
+                        try:
+                            vk = get_vk_for_key(k)
+                            if vk == 0: continue
+                            scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
+                            ctypes.windll.user32.keybd_event(vk, scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0)
+                        except Exception as hw_e:
+                            log_diag(f"[Hotkey Bridge] Release mapping failure for {k}: {hw_e}")
+                else:
+                    # Non-Windows (Linux / macOS)
+                    if shutil.which("xdotool"):
+                        try:
+                            subprocess.run(["xdotool", "key", keys_str.replace("+", "+")], check=False)
+                        except Exception as e:
+                            log_diag(f"[Hotkey Bridge] xdotool error: {e}")
+                    elif pynput_keyboard:
+                        if not _simulate_keypress_pynput(keys_str):
+                            if keyboard:
+                                try: keyboard.send(keys_str)
+                                except Exception as e: log_diag(f"[Hotkey Bridge] keyboard.send error: {e}")
+                    elif keyboard:
+                        try:
+                            keyboard.send(keys_str)
+                        except Exception as e:
+                            log_diag(f"[Hotkey Bridge] keyboard.send error: {e}")
+                    else:
+                        log_diag(f"[Hotkey Bridge] Hotkey simulation not supported on this OS setup ({keys_str})")
+
             except Exception as e:
                 log_diag(f"[Hotkey Bridge] Error firing {keys_str}: {e}")
                 
@@ -115,9 +184,6 @@ def check_and_fire_hotkeys(config, incoming_trigger, event_queue=None):
         hk_trigger = hk.get("trigger", "").strip()
         if not hk_trigger: continue
         
-        # Turn "Twitch * sub" into a much safer regex matching rule that ignores extra spaces
-        # and doesn't get strict locked behind ^ and $ edge boundaries that tests ruin
-        # Ex: "Twitch * sub" -> "Twitch .* sub"
         base_pattern = re.escape(hk_trigger).replace(r"\*", ".*")
         pattern_str = f"(?i){base_pattern}"
         
@@ -137,9 +203,6 @@ def check_and_fire_hotkeys(config, incoming_trigger, event_queue=None):
                     elif raw_key == "num /": raw_key = "divide"
                     else: raw_key = raw_key.replace("num ", "numpad ")
                 
-                # 'keyboard' module uses 'page up'/'page down' with spaces.
-                # Just ensure it maps correctly to the underlying OS hook string
-                
                 if raw_key:
                     modifiers.append(raw_key)
                     _execute_macro("+".join(modifiers), int(hk.get("delay", 0)))
@@ -147,8 +210,24 @@ def check_and_fire_hotkeys(config, incoming_trigger, event_queue=None):
             log_diag(f"[Hotkey Bridge] Pattern error '{hk_trigger}': {e}")
 
 
+def stop_key_listener():
+    global _pynput_listener, _pressed_keys
+    _pressed_keys.clear()
+    if _pynput_listener is not None:
+        try:
+            _pynput_listener.stop()
+        except Exception:
+            pass
+        _pynput_listener = None
+
+    if keyboard:
+        try:
+            keyboard.unhook_all()
+        except Exception:
+            pass
+
 def start_key_listener(config, event_queue):
-    global _last_fired
+    global _last_fired, _pynput_listener, _pressed_keys
     
     def log_diag(msg):
         print(msg)
@@ -156,53 +235,105 @@ def start_key_listener(config, event_queue):
             event_queue.put(("system_diag", "KeyTriggers", "diag", "diag", {"message": msg}))
         except: pass
 
-    # Clean up existing hotkeys if any are currently bound
-    if keyboard is not None:
-        try:
-            keyboard.unhook_all()
-        except Exception as e:
-            log_diag(f"[KeyTriggers] Warning unhooking keys: {e}")
+    stop_key_listener()
 
     if not config.get("enable_hotkeys", False):
         log_diag("[KeyTriggers] Hotkeys disabled in settings. Skipping listener initialization.")
         return
             
     _last_fired.clear()
+    _pressed_keys.clear()
 
-    if not keyboard:
-        log_diag("[KeyTriggers] Warning: 'keyboard' module not installed. Keypress triggers will not work.")
-        return
-        
     hotkey_configs = config.get("key_to_triggers", [])
     if not hotkey_configs:
         return
 
     log_diag(f"[KeyTriggers] Registering {len(hotkey_configs)} keypress triggers...")
     
-    for idx, hk in enumerate(hotkey_configs):
+    parsed_triggers = []
+    for hk in hotkey_configs:
         trigger_str = hk.get("trigger", "").strip()
         if not trigger_str: continue
         
-        # Build the hotkey string as expected by 'keyboard' module
-        modifiers = []
-        if hk.get("ctrl"): modifiers.append("ctrl")
-        if hk.get("alt"): modifiers.append("alt")
-        if hk.get("shift"): modifiers.append("shift")
+        modifiers = set()
+        if hk.get("ctrl"): modifiers.add("ctrl")
+        if hk.get("alt"): modifiers.add("alt")
+        if hk.get("shift"): modifiers.add("shift")
         
-        # Format the base key for the python keyboard module constraints
         raw_key = (hk.get("assigned_key") or hk.get("key") or "").lower().strip()
         base_key = raw_key
         if base_key.startswith("num "):
             base_key = base_key.replace("num ", "numpad ")
 
-        if base_key:
-            modifiers.append(base_key)
+        if not base_key: continue
         
-        if not modifiers:
-            continue
-            
-        kb_str = "+".join(modifiers)
-        
+        kb_str = "+".join(sorted(list(modifiers) + [base_key]))
+        parsed_triggers.append({
+            "trigger_str": trigger_str,
+            "modifiers": modifiers,
+            "base_key": base_key,
+            "delay_ms": int(hk.get("delay", 0)),
+            "kb_str": kb_str
+        })
+
+    # On Linux or non-root environments, use pynput to avoid keyboard's hardcoded root check
+    use_pynput = sys.platform.startswith("linux") or (keyboard is None)
+
+    if use_pynput and pynput_keyboard:
+        try:
+            def on_press(key):
+                kname = _normalize_key_name(key)
+                if kname:
+                    _pressed_keys.add(kname)
+
+                for item in parsed_triggers:
+                    base_k = item["base_key"]
+                    req_mods = item["modifiers"]
+                    
+                    if kname == base_k:
+                        if req_mods.issubset(_pressed_keys):
+                            now = time.time()
+                            hotkey_id = item["kb_str"]
+                            if now - _last_fired.get(hotkey_id, 0) < 0.5:
+                                continue
+                            _last_fired[hotkey_id] = now
+                            
+                            t_str = item["trigger_str"]
+                            delays = item["delay_ms"]
+                            
+                            def _push():
+                                log_diag(f"[KeyTriggers] >> DETECTED (pynput): '{hotkey_id}'! Firing: '{t_str}'")
+                                event_queue.put(("local_hotkey", "System", "Key Trigger", t_str, {"message": "", "username": "LocalUser"}))
+
+                            if delays > 0:
+                                threading.Timer(delays / 1000.0, _push).start()
+                            else:
+                                _push()
+
+            def on_release(key):
+                kname = _normalize_key_name(key)
+                if kname in _pressed_keys:
+                    _pressed_keys.discard(kname)
+
+            _pynput_listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
+            _pynput_listener.start()
+            log_diag("[KeyTriggers] pynput global key listener started successfully (No root required).")
+            return
+        except Exception as p_err:
+            log_diag(f"[KeyTriggers] pynput listener failed: {p_err}. Falling back to keyboard module.")
+
+    # Fallback to keyboard module (Windows / Root)
+    if not keyboard:
+        log_diag("[KeyTriggers] Warning: Neither pynput nor keyboard module is available.")
+        return
+
+    for item in parsed_triggers:
+        kb_str = item["kb_str"]
+        base_key = item["base_key"]
+        modifiers = item["modifiers"]
+        trigger_str = item["trigger_str"]
+        delay_ms = item["delay_ms"]
+
         def make_callback(t_str, delays, hotkey_id):
             log_diag(f"[KeyTriggers] Binding OS Hook: {hotkey_id} -> {t_str}")
             def callback():
@@ -220,15 +351,10 @@ def start_key_listener(config, event_queue):
                 else:
                     _push()
             return callback
-        
+
         try:
-            delay_ms = int(hk.get("delay", 0))
-            
-            # Use raw unhookable Global Listener binding instead of structured Hotkeys
-            # This completely bypasses Windows focus requirements by reading the direct raw buffer
             def global_listener(e):
                 if e.event_type == 'down' and e.name == base_key:
-                    # Check modifiers locally instead of relying on the keyboard modules broken state machine
                     mods_active = True
                     if 'ctrl' in modifiers and not keyboard.is_pressed('ctrl'): mods_active = False
                     if 'alt' in modifiers and not keyboard.is_pressed('alt'): mods_active = False
@@ -242,10 +368,3 @@ def start_key_listener(config, event_queue):
             
         except Exception as e:
             log_diag(f"[KeyTriggers] Failed to bind ({kb_str}) -> {trigger_str}: {e}")
-
-def stop_key_listener():
-    if keyboard:
-        try:
-            keyboard.unhook_all()
-        except:
-            pass

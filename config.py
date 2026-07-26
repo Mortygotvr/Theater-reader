@@ -13,10 +13,27 @@ def get_base_path():
     except Exception:
         return os.getcwd()
 
-BASE_DIR = get_base_path()
+def get_static_path():
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS
+    return get_base_path()
 
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-SUB_CACHE_FILE = os.path.join(BASE_DIR, "sub_cache.json")
+BASE_DIR = get_base_path()
+STATIC_DIR = get_static_path()
+
+def get_user_data_dir():
+    if os.access(BASE_DIR, os.W_OK):
+        return BASE_DIR
+    xdg_config = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    user_dir = os.path.join(xdg_config, "TheaterReader")
+    os.makedirs(user_dir, exist_ok=True)
+    return user_dir
+
+USER_DATA_DIR = get_user_data_dir()
+CONFIG_FILE = os.path.join(USER_DATA_DIR, "config.json")
+SUB_CACHE_FILE = os.path.join(USER_DATA_DIR, "sub_cache.json")
+
+
 
 # Global Databases
 BADGE_DB = {}
@@ -136,6 +153,13 @@ def _load_complete_config_state_impl():
                     
         except Exception as e:
             print(f"!!! CRITICAL LOAD ERROR in config.py: {e}", flush=True)
+    else:
+        try:
+            print(f"[CONFIG] Initializing new default configuration at {CONFIG_FILE}")
+            _save_complete_config_state_impl(state)
+        except Exception as save_err:
+            print(f"[CONFIG] Warning saving initial default config: {save_err}")
+
             
     GLOBAL_CONFIG.clear()
     GLOBAL_CONFIG.update(state)
