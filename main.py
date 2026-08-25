@@ -501,6 +501,9 @@ async def main():
 
 def create_image():
     icon_paths = [
+        os.path.join(getattr(sys, '_MEIPASS', ''), 'icon.ico'),
+        os.path.join(BASE_DIR, 'icon.ico'),
+        os.path.join(BASE_DIR, 'Reader-2.ico'),
         os.path.join(STATIC_DIR, 'org.theater.TheaterReader.png'),
         os.path.join(BASE_DIR, 'org.theater.TheaterReader.png'),
     ]
