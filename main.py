@@ -2,6 +2,14 @@ import asyncio
 import os
 import sys
 
+if sys.platform == 'win32':
+    import ctypes
+    try:
+        myappid = 'mortygotvr.theaterreader.backend.101'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
 import queue
 import re
 import uuid
